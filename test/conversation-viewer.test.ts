@@ -718,6 +718,25 @@ describe("ConversationViewer", () => {
       assertAllLinesFit(callBuildContentLines(viewer, w), w);
     });
 
+    it("rewraps cached messages when the width changes", () => {
+      // Each message's lines are cached; a resize must rebuild them at the new
+      // width rather than serve, or merely clip, the old ones.
+      const text = "word ".repeat(60).trim();
+      const messages = [
+        { role: "user", content: text },
+        { role: "toolResult", toolUseId: "t1", content: [{ type: "text", text }] },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, 120), mockSession(messages), mockRecord({ status: "completed" }), undefined, ansiTheme(), vi.fn(),
+      );
+      const wide = callBuildContentLines(viewer, 120);
+      const narrow = callBuildContentLines(viewer, 30);
+
+      assertAllLinesFit(narrow, 30);
+      expect(narrow.length).toBeGreaterThan(wide.length);
+      expect(narrow.filter(l => l.includes("..."))).toEqual([]);
+    });
+
     it("clamps overwidth lines from assistant message content", () => {
       const w = 80;
       wrapOverride = () => ["Z".repeat(w + 100)];

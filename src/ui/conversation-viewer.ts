@@ -32,11 +32,10 @@ export function getConversationOverlayOptions(tui: Pick<TUI, "mode">): OverlayOp
 /**
  * Cap on a single tool result or bash output before the viewer elides the rest.
  *
- * The cap is not cosmetic — it bounds render cost. `buildContentLines()` runs on
- * every render *and* on every scroll key (`handleInput` calls it to compute
- * `maxScroll`), so an uncapped 200 KB result costs ~6 ms per keystroke to parse
- * as Markdown, against ~0.5 ms once capped and effectively nothing on a cache
- * hit (best of 5, width 76). 16 KB is roughly a screenful at every terminal size
+ * The cap is not cosmetic — it bounds render cost. A message's lines are cached,
+ * but they are rebuilt whenever the width or the Markdown mode changes, and an
+ * uncapped 200 KB result costs ~6 ms to parse as Markdown, against ~0.5 ms once
+ * capped (best of 5, width 76). 16 KB is roughly a screenful at every terminal size
  * and still ~30x the 500 characters this replaces, which was small enough to cut
  * most real results mid-sentence.
  */
@@ -151,6 +150,30 @@ function truncationNote(elided: number): string {
   return `... (truncated, ${humanCount(elided)} more character${elided === 1 ? "" : "s"})`;
 }
 
+/**
+ * Everything a message's rendered block depends on besides width and mode, as
+ * one string — or `undefined` for a message the viewer does not show.
+ *
+ * Compared by value on every frame, so a message whose content changes in
+ * place is rebuilt rather than served stale.
+ */
+function messageSource(msg: AgentSession["messages"][number]): string | undefined {
+  switch (msg.role) {
+    case "user":
+      return (typeof msg.content === "string" ? msg.content : extractText(msg.content)).trim() || undefined;
+    case "assistant":
+      return msg.content
+        .map(c => c.type === "text" ? c.text : c.type === "toolCall" ? (c as any).name ?? (c as any).toolName : "")
+        .join("\0");
+    case "toolResult":
+      return extractText(msg.content).trim() || undefined;
+    default: {
+      const bash = msg as any;
+      return bash.role === "bashExecution" ? `${bash.command}\0${bash.output ?? ""}` : undefined;
+    }
+  }
+}
+
 export class ConversationViewer implements Component, Focusable {
   private scrollOffset = 0;
   private autoScroll = true;
@@ -181,6 +204,13 @@ export class ConversationViewer implements Component, Focusable {
    * Weak so a compacted-away message doesn't pin its render.
    */
   private readonly markdownCache = new WeakMap<object, { md: Markdown; text: string; failed?: boolean }>();
+  /**
+   * Each message's finished lines. The Markdown cache alone still left every
+   * frame re-wrapping every raw message and re-clamping every line, which made
+   * a frame cost linear in the whole transcript — and a running agent redraws
+   * on every streamed token.
+   */
+  private readonly blockCache = new WeakMap<object, { width: number; mode: ViewerMarkdownMode; source: string; lines: string[] }>();
 
   constructor(
     private tui: TUI,
@@ -471,7 +501,7 @@ export class ConversationViewer implements Component, Focusable {
     if (invocationLine) lines.push(row(invocationLine));
     lines.push(hrMid);
 
-    // Content area — rebuild every render (live data, no cache needed)
+    // Content area — reassembled every render from per-message cached blocks
     const contentLines = this.fullscreen ? this.scrollView.render(width - 1) : this.buildContentLines(innerW);
     const viewportHeight = this.viewportHeight();
     const maxScroll = Math.max(0, contentLines.length - viewportHeight);
@@ -715,66 +745,18 @@ export class ConversationViewer implements Component, Focusable {
     const lines: string[] = [];
 
     if (messages.length === 0) {
-      lines.push(th.fg("dim", "(waiting for first message...)"));
+      lines.push(truncateToWidth(th.fg("dim", "(waiting for first message...)"), width));
       return lines;
     }
 
     const mode = this.markdownMode();
+    const separator = truncateToWidth(th.fg("dim", "───"), width);
     let needsSeparator = false;
     for (const msg of messages) {
-      if (msg.role === "user") {
-        const text = typeof msg.content === "string"
-          ? msg.content
-          : extractText(msg.content);
-        if (!text.trim()) continue;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.fg("accent", "[User]"));
-        for (const line of wrapTextWithAnsi(text.trim(), width)) {
-          lines.push(line);
-        }
-      } else if (msg.role === "assistant") {
-        const textParts: string[] = [];
-        const toolCalls: string[] = [];
-        for (const c of msg.content) {
-          if (c.type === "text" && c.text) textParts.push(c.text);
-          else if (c.type === "toolCall") {
-            toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
-          }
-        }
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.bold("[Assistant]"));
-        if (textParts.length > 0) {
-          const text = textParts.join("\n").trim();
-          lines.push(...(mode === "off"
-            ? this.rawLines(text, width, false)
-            : this.markdownLines(msg, text, width, false)));
-        }
-        for (const name of toolCalls) {
-          lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
-        }
-      } else if (msg.role === "toolResult") {
-        const { text, elided } = capResult(extractText(msg.content).trim());
-        if (!text) continue;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.fg("dim", "[Result]"));
-        lines.push(...(mode === "all"
-          ? this.markdownLines(msg, text, width, true)
-          : this.rawLines(text, width, true)));
-        if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
-      } else if ((msg as any).role === "bashExecution") {
-        const bash = msg as any;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(truncateToWidth(th.fg("muted", `  $ ${bash.command}`), width));
-        if (bash.output?.trim()) {
-          // Same cap as a tool result, never Markdown: command output is the one
-          // thing here that is definitionally not authored as Markdown.
-          const { text, elided } = capResult(bash.output.trim());
-          lines.push(...this.rawLines(text, width, true));
-          if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
-        }
-      } else {
-        continue;
-      }
+      const block = this.messageLines(msg, width, mode);
+      if (!block) continue;
+      if (needsSeparator) lines.push(separator);
+      for (const line of block) lines.push(line);
       needsSeparator = true;
     }
 
@@ -785,6 +767,64 @@ export class ConversationViewer implements Component, Focusable {
       lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
     }
 
-    return lines.map(l => truncateToWidth(l, width));
+    return lines;
+  }
+
+  /**
+   * One message's lines, clamped to `width`, or `undefined` for a message the
+   * viewer does not show. Served from `blockCache` unless the width, the mode,
+   * or the text the block was built from has changed.
+   */
+  private messageLines(msg: AgentSession["messages"][number], width: number, mode: ViewerMarkdownMode): string[] | undefined {
+    const source = messageSource(msg);
+    if (source === undefined) return undefined;
+    const cached = this.blockCache.get(msg);
+    if (cached && cached.width === width && cached.mode === mode && cached.source === source) return cached.lines;
+
+    const th = this.theme;
+    const lines: string[] = [];
+    if (msg.role === "user") {
+      lines.push(th.fg("accent", "[User]"), ...wrapTextWithAnsi(source, width));
+    } else if (msg.role === "assistant") {
+      const textParts: string[] = [];
+      const toolCalls: string[] = [];
+      for (const c of msg.content) {
+        if (c.type === "text" && c.text) textParts.push(c.text);
+        else if (c.type === "toolCall") {
+          toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
+        }
+      }
+      lines.push(th.bold("[Assistant]"));
+      if (textParts.length > 0) {
+        const text = textParts.join("\n").trim();
+        lines.push(...(mode === "off"
+          ? this.rawLines(text, width, false)
+          : this.markdownLines(msg, text, width, false)));
+      }
+      for (const name of toolCalls) {
+        lines.push(th.fg("muted", `  [Tool: ${name}]`));
+      }
+    } else if (msg.role === "toolResult") {
+      const { text, elided } = capResult(source);
+      lines.push(th.fg("dim", "[Result]"));
+      lines.push(...(mode === "all"
+        ? this.markdownLines(msg, text, width, true)
+        : this.rawLines(text, width, true)));
+      if (elided) lines.push(th.fg("dim", truncationNote(elided)));
+    } else {
+      const bash = msg as any;
+      lines.push(th.fg("muted", `  $ ${bash.command}`));
+      if (bash.output?.trim()) {
+        // Same cap as a tool result, never Markdown: command output is the one
+        // thing here that is definitionally not authored as Markdown.
+        const { text, elided } = capResult(bash.output.trim());
+        lines.push(...this.rawLines(text, width, true));
+        if (elided) lines.push(th.fg("dim", truncationNote(elided)));
+      }
+    }
+
+    const clamped = lines.map(l => truncateToWidth(l, width));
+    this.blockCache.set(msg, { width, mode, source, lines: clamped });
+    return clamped;
   }
 }

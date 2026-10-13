@@ -3,22 +3,21 @@
  * growing size.
  *
  * The highest-value benchmark in the repo: this is the only frame-rate path
- * whose cost is unbounded in the data it renders. `buildContentLines()` rebuilds
- * the *entire* transcript on every render — "rebuild every render (live data, no
- * cache needed)", conversation-viewer.ts — and the viewer subscribes to the
+ * whose cost grows with the data it renders. The viewer subscribes to the
  * session, so a running agent redraws it on every token (coalesced by pi at
- * ~62 Hz). Everything above the viewport is built and thrown away, and
- * `handleInput` builds it a second time on every scroll key just to count lines.
+ * ~62 Hz), and `handleInput` assembles the transcript again on every scroll key
+ * to count lines. Each message's lines are cached, so a warm frame only
+ * concatenates them; a warm number that climbs toward the cold one means that
+ * cache stopped hitting.
  *
  * Both markdown modes are measured. `assistant` is the default and sends
  * assistant text through pi's Markdown parser; `off` is the raw wrap path. The
  * pair is the cost of #259, and the cap it introduced (RESULT_MAX_CHARS) is what
  * keeps a single large tool result from dominating the whole frame.
  *
- * Cold vs warm is the other axis worth knowing: the Markdown cache is a WeakMap
- * keyed by the message object, so the first frame parses and later frames reuse.
- * A regression that breaks cache identity would leave "warm" looking like
- * "cold" here while every other test stays green.
+ * Cold vs warm is the other axis worth knowing: the line and Markdown caches
+ * are WeakMaps keyed by the message object, so the first frame wraps and parses
+ * and later frames reuse.
  */
 import { bench, describe } from "vitest";
 import { ConversationViewer } from "../../src/ui/conversation-viewer.js";

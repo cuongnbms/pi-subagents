@@ -56,34 +56,52 @@ beforeEach(() => {
 });
 
 describe("ConversationViewer — cost stays linear in transcript length", () => {
-  /** Leaf calls one render makes over a transcript of `n` messages. */
-  function wrapsFor(n: number, mode: string): number {
+  /** Leaf calls of a first frame, then of the frame after it, over `n` messages. */
+  function wrapsFor(n: number, mode: string): { cold: number; warm: number } {
     const viewer = mountViewer(ConversationViewer, makeSession(n), undefined, () => mode);
-    viewer.render(120); // prime, so caches are warm and only steady state counts
+    viewer.render(120);
+    const cold = counts.wrap + counts.markdownRender;
     counts.wrap = 0;
     counts.markdownRender = 0;
     viewer.render(120);
-    return counts.wrap + counts.markdownRender;
+    return { cold, warm: counts.wrap + counts.markdownRender };
   }
 
-  // The viewer rebuilds every line of the transcript on every frame, so the work
-  // is expected to grow with it. What must not happen is growing FASTER than it:
-  // ten times the messages, at most ~ten times the work. A quadratic here is
-  // invisible on a short conversation and locks the TUI on a long one.
-  it("does ~10x the work for 10x the messages (raw wrap path)", () => {
-    const small = wrapsFor(30, "off");
-    const large = wrapsFor(300, "off");
+  // The first frame builds every message, so its work grows with the
+  // transcript. What must not happen is growing FASTER than it: ten times the
+  // messages, at most ~ten times the work. A quadratic here is invisible on a
+  // short conversation and locks the TUI on a long one.
+  for (const mode of ["off", "assistant"]) {
+    it(`builds a first frame in ~10x the work for 10x the messages (${mode})`, () => {
+      const small = wrapsFor(30, mode).cold;
+      const large = wrapsFor(300, mode).cold;
 
-    expect(small).toBeGreaterThan(0);
-    expect(large / small).toBeLessThanOrEqual(11);
-  });
+      expect(small).toBeGreaterThan(0);
+      expect(large / small).toBeLessThanOrEqual(11);
+    });
 
-  it("does ~10x the work for 10x the messages (markdown path)", () => {
-    const small = wrapsFor(30, "assistant");
-    const large = wrapsFor(300, "assistant");
+    // Every later frame — one per streamed token while the agent runs — reuses
+    // each message's finished lines. If it ever rebuilds them, a frame costs the
+    // whole transcript again, which is what made a long-running agent's viewer lag.
+    it(`re-renders without rebuilding any message, at any length (${mode})`, () => {
+      const small = wrapsFor(30, mode).warm;
+      const large = wrapsFor(300, mode).warm;
 
-    expect(small).toBeGreaterThan(0);
-    expect(large / small).toBeLessThanOrEqual(11);
+      expect(large).toBeLessThanOrEqual(small);
+      expect(large).toBeLessThanOrEqual(1);
+    });
+  }
+
+  it("builds only the new message when one is appended", () => {
+    const session = makeSession(300);
+    const viewer = mountViewer(ConversationViewer, session, undefined, () => "off");
+    viewer.render(120);
+    session.messages.push({ role: "user", content: "one more message" });
+    counts.wrap = 0;
+    counts.markdownRender = 0;
+    viewer.render(120);
+
+    expect(counts.wrap + counts.markdownRender).toBeLessThanOrEqual(1);
   });
 
   // #259's WeakMap is keyed by the message object. If a refactor ever rebuilds
