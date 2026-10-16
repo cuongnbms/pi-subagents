@@ -107,6 +107,27 @@ describe("AgentWidget", () => {
       .join("\n");
   }
 
+  it("cycles the widget through Pikit-style stars and wraps around", () => {
+    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    const widget = new AgentWidget(
+      manager as unknown as ConstructorParameters<typeof AgentWidget>[0],
+      new Map(),
+    );
+    let render = (): string[] => [];
+    widget.setUICtx({
+      setStatus: () => {},
+      setWidget: (_key, content) => {
+        if (content) render = content({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render;
+      },
+    });
+
+    for (const frame of ["✢", "✳", "✶", "✻", "✽", "·", "✢"]) {
+      widget.update();
+      expect(render()[1]).toContain(`└─ ${frame} `);
+    }
+    widget.dispose();
+  });
+
   // "all" (and the no-policy constructor default) shows every agent.
   it("shows foreground agents in 'all' mode (and by default)", () => {
     const manager = { listAgents: () => [makeRecord("foreground", { isBackground: false })] };

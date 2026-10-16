@@ -20,6 +20,9 @@ const MAX_WIDGET_LINES = 12;
 /** Braille spinner frames for animated running indicator. */
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/** Pikit-style stars for the above-editor widget only. */
+const WIDGET_SPINNER = ["·", "✢", "✳", "✶", "✻", "✽"];
+
 /** Statuses that indicate an error/non-success outcome (used for linger behavior and icon rendering). */
 export const ERROR_STATUSES = new Set(["error", "aborted", "steered", "stopped"]);
 
@@ -435,7 +438,7 @@ export class AgentWidget {
     const truncate = (line: string) => truncateToWidth(line, w);
     const headingColor = hasActive ? "accent" : "dim";
     const headingIcon = hasActive ? "●" : "○";
-    const frame = SPINNER[this.widgetFrame % SPINNER.length];
+    const frame = WIDGET_SPINNER[this.widgetFrame % WIDGET_SPINNER.length];
 
     // Build sections separately for overflow-aware assembly.
     // Each running agent = 2 lines (header + activity), finished = 1 line, queued = 1 line.
